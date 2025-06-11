@@ -1,0 +1,5 @@
+clasificador_RF1.py
+*.swp
+dataset/*
+*.pdf
+*.csv
