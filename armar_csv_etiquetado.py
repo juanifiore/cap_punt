@@ -10,8 +10,9 @@ import torch
 # ================================
 agregar_emb = False
 agregar_emb_red = True
-dim = 5
-nombre_csv = "tokens_etiquetados.csv"
+dim = 15
+nombre_csv_entrada = "oraciones_final.csv"
+nombre_csv_salida = "tokens_etiquetados_or_fin1000_dim_15.csv"
 
 
 # MODELOS (TOKENIZADOR Y EMBEDDER)
@@ -73,7 +74,7 @@ def procesar_texto(texto, instancia_id, agregar_emb=False, agregar_emb_red=False
     # Armamos las filas del csv etiquetando cada token
     filas = []
 
-    for palabra, start, end, punt_ini, punt_fin in puntuacion_palabra:
+    for idx_palabra, (palabra, start, end, punt_ini, punt_fin) in enumerate(puntuacion_palabra):
         # Capitalización
         if palabra.islower():
             cap = 0
@@ -97,17 +98,26 @@ def procesar_texto(texto, instancia_id, agregar_emb=False, agregar_emb_red=False
                 "token": tok,
                 "punt_inicial": punt_ini if i == 0 else "",
                 "punt_final": punt_fin if i == len(token_ids) - 1 else "",
-                "capitalización": cap
+                "capitalización": cap,
+                "es_inicio_instancia": 1 if idx_palabra == 0 and i == 0 else 0,
+                "es_fin_instancia": 1 if idx_palabra == len(puntuacion_palabra) - 1 and i == len(token_ids) - 1 else 0,
+                "es_primer_token": 1 if i == 0 else 0,
+                "es_ultimo_token": 1 if i == len(token_ids) - 1 else 0
             })
+    
+    # Agregar es_inicio_instancia y es_fin_instancia
+
+
+
 
     # Agregar índice de oración (distancia desde la última puntuación final)
-    indice_oracion = 0
-    for fila in filas:
-        fila["indice_oracion"] = indice_oracion
-        if fila["punt_final"] in [".", "?"]:
-            indice_oracion = 0  # reinicia después de puntuación final
-        else:
-            indice_oracion += 1
+#    indice_oracion = 0
+#    for fila in filas:
+#        fila["indice_oracion"] = indice_oracion
+#        if fila["punt_final"] in [".", "?"]:
+#            indice_oracion = 0  # reinicia después de puntuación final
+#        else:
+#            indice_oracion += 1
 
     # Agregar columnas i_punt_inicial, i_punt_final e i_puntuacion
     # Estas columnas seran usadas como etiquetas para entrenar el modelo
@@ -120,7 +130,7 @@ def procesar_texto(texto, instancia_id, agregar_emb=False, agregar_emb_red=False
     for fila in filas:
         fila["i_punt_inicial"] = punct_to_index.get(fila["punt_inicial"], 0) 
         fila["i_punt_final"] = punct_to_index.get(fila["punt_final"], 0) 
-        fila["i_puntuacion"] = punct_to_index.get(fila["punt_inicial"], 0) + punct_to_index.get(fila["punt_final"], 0)
+        #fila["i_puntuacion"] = punct_to_index.get(fila["punt_inicial"], 0) + punct_to_index.get(fila["punt_final"], 0)
 
     # AGREGAR EMBEDDING
     embeddings = []
@@ -142,7 +152,8 @@ def procesar_texto(texto, instancia_id, agregar_emb=False, agregar_emb_red=False
 
 
 # Leer el CSV (debe tener columna "texto")
-df_entrada = pd.read_csv("textos.csv") 
+df_entrada = pd.read_csv(nombre_csv_entrada) 
+df_entrada = df_entrada.iloc[:1000]
 
 # Lista donde acumularemos todas las instancias
 todas_las_instancias = []
@@ -177,6 +188,6 @@ if agregar_emb_red:
 df_final = pd.DataFrame(todas_las_instancias)
 
 # Guardar como CSV
-df_final.to_csv(nombre_csv, index=False)
+df_final.to_csv(nombre_csv_salida, index=False)
 
 print(df_final)

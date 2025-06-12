@@ -1,0 +1,46 @@
+              precision    recall  f1-score   support
+
+           0       0.92      0.97      0.94      3978
+           1       0.44      0.22      0.29       412
+           2       0.00      0.00      0.00         3
+           3       1.00      0.05      0.10        20
+
+    accuracy                           0.90      4413
+   macro avg       0.59      0.31      0.33      4413
+weighted avg       0.87      0.90      0.88      4413
+
+[[3863  115    0    0]
+ [ 321   91    0    0]
+ [   3    0    0    0]
+ [  19    0    0    1]]
+
+--- Resultados para i_punt_inicial ---
+              precision    recall  f1-score   support
+
+           0       1.00      1.00      1.00      4394
+           1       0.25      0.05      0.09        19
+
+    accuracy                           1.00      4413
+   macro avg       0.62      0.53      0.54      4413
+weighted avg       0.99      1.00      0.99      4413
+
+[[4391    3]
+ [  18    1]]
+
+--- Resultados para i_punt_final ---
+              precision    recall  f1-score   support
+
+           0       0.91      0.97      0.94      3986
+           2       0.10      0.04      0.06        23
+           3       0.19      0.09      0.12       195
+           4       0.15      0.06      0.09       209
+
+    accuracy                           0.88      4413
+   macro avg       0.34      0.29      0.30      4413
+weighted avg       0.84      0.88      0.86      4413
+
+[[3853    8   62   63]
+ [  20    1    2    0]
+ [ 167    1   18    9]
+ [ 183    0   13   13]]
+
