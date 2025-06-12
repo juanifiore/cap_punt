@@ -5,6 +5,14 @@ import re
 from transformers import BertTokenizer, BertModel
 import torch
 
+# ================================
+# PARAMETROS DE LA FUNCION 
+# ================================
+agregar_emb = False
+agregar_emb_red = True
+dim = 5
+nombre_csv = "tokens_etiquetados.csv"
+
 
 # MODELOS (TOKENIZADOR Y EMBEDDER)
 model_name = "bert-base-multilingual-cased"
@@ -146,12 +154,6 @@ for idx, fila in df_entrada.iterrows():
     texto = fila["texto"]
     instancia_id = idx + 1 
 
-    # ================================
-    # PARAMETROS DE LA FUNCION 
-    # ================================
-    agregar_emb = True
-    agregar_emb_red = True
-    dim = 5
     # usamos la funcion proceasar_texto
     filas, embeddings = procesar_texto(texto, instancia_id, 
                                        agregar_emb=agregar_emb, agregar_emb_red=agregar_emb_red, dim=dim)
@@ -175,6 +177,6 @@ if agregar_emb_red:
 df_final = pd.DataFrame(todas_las_instancias)
 
 # Guardar como CSV
-df_final.to_csv("tokens_etiquetados.csv", index=False)
+df_final.to_csv(nombre_csv, index=False)
 
 print(df_final)
