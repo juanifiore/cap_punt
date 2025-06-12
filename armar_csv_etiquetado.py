@@ -23,7 +23,7 @@ def get_multilingual_token_embedding(token_id):
     #print(f"Embedding shape: {embedding_vector.shape}")
     return embedding_vector
 
-def procesar_texto(texto, instancia_id, agregar_emb=False):
+def procesar_texto(texto, instancia_id, agregar_emb=False, agregar_emb_red=False, dim=5):
 
     # Arma una lista con las palabras o puntuaciones (¿?.,) junto con los indices de inicio y fin en el texto
     matches = list(re.finditer(r"\w+('\w+)?|[¿?,\.]", texto))
@@ -115,26 +115,30 @@ def procesar_texto(texto, instancia_id, agregar_emb=False):
         fila["i_puntuacion"] = punct_to_index.get(fila["punt_inicial"], 0) + punct_to_index.get(fila["punt_final"], 0)
 
     # AGREGAR EMBEDDING
-    if agregar_emb:
+    embeddings = []
+    if agregar_emb or agregar_emb_red:
         # Calculamos embeddings de cada token
-        embeddings = []
         for fila in filas:
             tensor = get_multilingual_token_embedding(fila["token_id"])
             embedding = tensor.detach().numpy()
-            embeddings.append(embedding)
+            if agregar_emb:
+                # Agregamos embedding de dimension original (768)
+                for i, valor in enumerate(embedding): # agrego 768 columnas al df, una por cada dimension
+                    fila[f"dim_{i}"] = valor
+                #fila["embedding"] = embedding
+            if agregar_emb_red:
+                embeddings.append(embedding)
 
-        # Agregar el embedding con dimension original (768)
-        for i, fila in enumerate(filas):
-            fila["embedding"] = embeddings[i]
 
-    return filas
+    return filas, embeddings 
 
 
 # Leer el CSV (debe tener columna "texto")
-df_entrada = pd.read_csv("dataset/textos.csv") 
+df_entrada = pd.read_csv("textos.csv") 
 
 # Lista donde acumularemos todas las instancias
 todas_las_instancias = []
+todos_los_embeddings = []
 
 instancia_id = 1
 # Iterar por cada texto (fila/instancia) en el CSV
@@ -142,24 +146,31 @@ for idx, fila in df_entrada.iterrows():
     texto = fila["texto"]
     instancia_id = idx + 1 
 
-    filas = procesar_texto(texto, instancia_id, agregar_emb=True)
+    # ================================
+    # PARAMETROS DE LA FUNCION 
+    # ================================
+    agregar_emb = True
+    agregar_emb_red = True
+    dim = 5
+    # usamos la funcion proceasar_texto
+    filas, embeddings = procesar_texto(texto, instancia_id, 
+                                       agregar_emb=agregar_emb, agregar_emb_red=agregar_emb_red, dim=dim)
 
     # Agregar al acumulador
     todas_las_instancias.extend(filas)
+    todos_los_embeddings.append(embeddings)
 
 
-# Agregamos embeddings con dimension reducida 
-agregar_emb_red = True
-dim = 5
-if agregar_emb_red == True:
+if agregar_emb_red:
     # Aplicar UMAP sobre los embedding de todos los textos
     # np.vstak apila todos los embeddings (arma matriz)
-    embeddings = [instancia["embedding"] for instancia in todas_las_instancias]
-    X = np.vstack(embeddings)
+    X = np.vstack([emb for lista in todos_los_embeddings for emb in lista])
     umap_model = umap.UMAP(n_components=dim, random_state=42)
     X_umap = umap_model.fit_transform(X)
     for i, fila in enumerate(todas_las_instancias):
-        fila["embedding_red"] = X_umap[i]
+        for j, valor in enumerate(X_umap[i]): # agrego i columnas al df, una por cada dimension
+            fila[f"dim_red_{j}"] = valor
+
 
 df_final = pd.DataFrame(todas_las_instancias)
 
