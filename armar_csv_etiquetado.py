@@ -1,9 +1,11 @@
+#%%
+
 import pandas as pd
 import numpy as np
 import umap.umap_ as umap
 import re
 from transformers import BertTokenizer, BertModel
-import torch
+from tqdm import tqdm
 
 # ================================
 # PARAMETROS DE LA FUNCION 
@@ -11,8 +13,8 @@ import torch
 agregar_emb = False
 agregar_emb_red = True
 dim = 15
-nombre_csv_entrada = "oraciones_final.csv"
-nombre_csv_salida = "tokens_etiquetados_or_fin1000_dim_15.csv"
+nombre_csv_entrada = "./datasets/oraciones_final.csv"
+nombre_csv_salida = "./tokens_etiquetados/tokens_etiquetados_or_fin1000_dim_152.csv"
 
 
 # MODELOS (TOKENIZADOR Y EMBEDDER)
@@ -94,6 +96,7 @@ def procesar_texto(texto, instancia_id, agregar_emb=False, agregar_emb_red=False
         for i, (tid, tok) in enumerate(zip(token_ids, token_texts)):
             filas.append({
                 "instancia_id": instancia_id,
+                "idx_palabra": idx_palabra,
                 "token_id": tid,
                 "token": tok,
                 "punt_inicial": punt_ini if i == 0 else "",
@@ -161,7 +164,7 @@ todos_los_embeddings = []
 
 instancia_id = 1
 # Iterar por cada texto (fila/instancia) en el CSV
-for idx, fila in df_entrada.iterrows():
+for idx, fila in tqdm(df_entrada.iterrows(), total=len(df_entrada)):
     texto = fila["texto"]
     instancia_id = idx + 1 
 
@@ -174,7 +177,7 @@ for idx, fila in df_entrada.iterrows():
     todos_los_embeddings.append(embeddings)
 
 
-if agregar_emb_red:
+if agregar_emb_red: # Reducir dimensionalidad 
     # Aplicar UMAP sobre los embedding de todos los textos
     # np.vstak apila todos los embeddings (arma matriz)
     X = np.vstack([emb for lista in todos_los_embeddings for emb in lista])
@@ -189,5 +192,7 @@ df_final = pd.DataFrame(todas_las_instancias)
 
 # Guardar como CSV
 df_final.to_csv(nombre_csv_salida, index=False)
-
+print('csv etiquetado final guardado correctamente')
 print(df_final)
+
+# %%

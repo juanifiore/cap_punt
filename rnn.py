@@ -1,0 +1,368 @@
+#%% Librerías
+# Librerías 
+
+import torch
+import pandas as pd
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report, accuracy_score
+import numpy as np
+from collections import Counter
+import torch
+
+#%% TextRestorationGRU
+# Clase que implementa un modelo de restauración de texto con GRU bidireccional.
+
+class TextRestorationGRU(nn.Module):
+    def __init__(self, embed_dim, hidden_dim, shared_dim, num_caps_tags, num_punt_ini_tags, num_punt_fin_tags, dropout=0.3):
+        super().__init__()
+        # GRU bidireccional
+        self.bigru = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
+        
+        # Capa común compartida
+        self.shared_layer = nn.Linear(hidden_dim * 2, shared_dim)
+        
+        # Cabezas para cada tarea
+        self.cap_head = nn.Linear(shared_dim, num_caps_tags)
+        self.punt_ini_head = nn.Linear(shared_dim, num_punt_ini_tags)
+        self.punt_fin_head = nn.Linear(shared_dim, num_punt_fin_tags)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, embeddings):
+        # embeddings: [batch_size, seq_len, embed_dim]
+        rnn_out, _ = self.bigru(embeddings)  # [batch, seq_len, hidden_dim*2]
+        rnn_out = self.dropout(rnn_out)
+        
+        # Capa común con activación ReLU
+        shared_rep = F.relu(self.shared_layer(rnn_out))  # [batch, seq_len, shared_dim]
+        
+        # Salidas separadas para capitalización y puntuación
+        return (
+            self.cap_head(shared_rep),         # logits capitalización
+            self.punt_ini_head(shared_rep),    # logits puntuación inicial
+            self.punt_fin_head(shared_rep),    # logits puntuación final
+        )
+
+#%% Dataset
+#Dataset
+
+# Cargar el CSV
+df = pd.read_csv("./tokens_etiquetados/tokens_etiquetados_or_fin1000_dim_152.csv")
+p_inicial = ["", "¿"]
+p_final = ["", ".", ",", "?"]
+
+# Crear lista con las columnas de embedding
+embedding_cols = [f"dim_red_{i}" for i in range(15)]
+
+# Agrupar por instancia (cada oración)
+grouped = df.groupby("instancia_id")
+
+
+X, y_cap, y_punt_ini, y_punt_fin = [], [], [], []
+
+for _, group in grouped:
+    X.append(group[embedding_cols].values)                      # shape: [seq_len, 15]
+    y_cap.append(group["capitalización"].values)                # [seq_len]
+    y_punt_ini.append(group["i_punt_inicial"].values)           # [seq_len]
+    y_punt_fin.append(group["i_punt_final"].values)             # [seq_len]
+
+
+class EmbeddingSequenceDataset(Dataset):
+    def __init__(self, X, y_cap, y_punt_ini, y_punt_fin):
+        self.X = X
+        self.y_cap = y_cap
+        self.y_punt_ini = y_punt_ini
+        self.y_punt_fin = y_punt_fin
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return (
+            torch.tensor(self.X[idx], dtype=torch.float32),
+            torch.tensor(self.y_cap[idx], dtype=torch.long),
+            torch.tensor(self.y_punt_ini[idx], dtype=torch.long),
+            torch.tensor(self.y_punt_fin[idx], dtype=torch.long),
+        )
+
+
+dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
+dataloader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=lambda x: list(zip(*x)))
+
+#%% Model
+# Model
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Usando dispositivo: {device}")
+
+model = TextRestorationGRU(
+    embed_dim=15,
+    hidden_dim=64,
+    shared_dim=32,
+    num_caps_tags=4,
+    num_punt_ini_tags=5,  
+    num_punt_fin_tags=5,
+).to(device)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+#%% Entrenamiento
+# Entrenamiento del modelo
+
+for epoch in range(20):
+    model.train()
+    total_loss = 0
+
+    for X_batch, y_cap_batch, y_ini_batch, y_fin_batch in dataloader:
+        X_batch = [x.to(device) for x in X_batch]
+        y_cap_batch = [y.to(device) for y in y_cap_batch]
+        y_ini_batch = [y.to(device) for y in y_ini_batch]
+        y_fin_batch = [y.to(device) for y in y_fin_batch]
+
+        optimizer.zero_grad()
+        batch_loss = 0
+
+        for x, y_cap, y_ini, y_fin in zip(X_batch, y_cap_batch, y_ini_batch, y_fin_batch):
+            x = x.unsqueeze(0)  # [1, seq_len, 15]
+            logits_cap, logits_ini, logits_fin = model(x)
+
+            loss_cap = criterion(logits_cap.squeeze(0), y_cap)
+            loss_ini = criterion(logits_ini.squeeze(0), y_ini)
+            loss_fin = criterion(logits_fin.squeeze(0), y_fin)
+
+            loss = loss_cap + loss_ini + loss_fin
+            loss.backward()
+            batch_loss += loss.item()
+
+        optimizer.step()
+        total_loss += batch_loss
+
+    print(f"Epoch {epoch+1} - Loss: {total_loss:.4f}")
+
+
+#%% Evaluación del modelo
+# Evaluación del modelo
+
+true_cap = []
+pred_cap = []
+
+true_ini = []
+pred_ini = []
+
+true_fin = []
+pred_fin = []
+
+model.eval()
+
+with torch.no_grad():
+    for X_batch, y_cap_batch, y_ini_batch, y_fin_batch in dataloader:
+        X_batch = [x.to(device) for x in X_batch]
+        y_cap_batch = [y.to(device) for y in y_cap_batch]
+        y_ini_batch = [y.to(device) for y in y_ini_batch]
+        y_fin_batch = [y.to(device) for y in y_fin_batch]
+
+        for x, y_cap, y_ini, y_fin in zip(X_batch, y_cap_batch, y_ini_batch, y_fin_batch):
+            x = x.unsqueeze(0)  # [1, seq_len, 15]
+            logits_cap, logits_ini, logits_fin = model(x)
+
+            pred_cap_logits = logits_cap.squeeze(0).argmax(dim=-1).cpu().numpy()
+            pred_ini_logits = logits_ini.squeeze(0).argmax(dim=-1).cpu().numpy()
+            pred_fin_logits = logits_fin.squeeze(0).argmax(dim=-1).cpu().numpy()
+
+            true_cap.extend(y_cap.cpu().numpy())
+            pred_cap.extend(pred_cap_logits)
+
+            true_ini.extend(y_ini.cpu().numpy())
+            pred_ini.extend(pred_ini_logits)
+
+            true_fin.extend(y_fin.cpu().numpy())
+            pred_fin.extend(pred_fin_logits)
+
+print("\n--- CAPITALIZACIÓN ---")
+print(classification_report(true_cap, pred_cap, target_names=["minúscula", "mayúscula", "Capitalizado", "Mixto"]))
+
+print("\n--- PUNTUACIÓN INICIAL ---")
+print(classification_report(true_ini, pred_ini))
+
+print("\n--- PUNTUACIÓN FINAL ---")
+print(classification_report(true_fin, pred_fin))
+
+# %% # Matriz de confusión para puntuación final
+# Matriz de confusión para puntuación final
+
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+# {"": 0, "¿": 1, "?": 2, ".": 3, ",": 4}
+
+cm = confusion_matrix(true_fin, pred_fin, labels=[0,1,2,3,4])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Nada', '¿', '?', '.', ','])
+disp.plot(cmap='Blues')
+plt.title("Matriz de confusión - Puntuación Final")
+plt.show()
+
+cm = confusion_matrix(true_ini, pred_ini, labels=[0,1,2,3,4])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Nada', '¿', '?', '.', ','])
+disp.plot(cmap='Blues')
+plt.title("Matriz de confusión - Puntuación Inicial")
+plt.show()
+
+cm = confusion_matrix(true_cap, pred_cap, labels=[0,1,2,3])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["minúscula", "mayúscula", "Capitalizado", "Mixto"])
+disp.plot(cmap='Blues')
+plt.title("Matriz de confusión - Capitalización")
+plt.show()
+
+#%% 
+
+dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
+dataloader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=lambda x: list(zip(*x)))
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Usando dispositivo: {device}")
+
+model = TextRestorationGRU(
+    embed_dim=15,
+    hidden_dim=64,
+    shared_dim=32,
+    num_caps_tags=4,
+    num_punt_ini_tags=5,  
+    num_punt_fin_tags=5,
+).to(device)
+
+# Capitalización: 4 clases
+num_caps_tags = 4
+all_labels_cap = np.concatenate(y_cap)
+freqs_cap = Counter(all_labels_cap)
+total_cap = sum(freqs_cap.values())
+weights_cap = torch.tensor([
+    total_cap / freqs_cap[i] if freqs_cap[i] > 0 else 0.0
+    for i in range(num_caps_tags)
+], dtype=torch.float32).to(device)
+
+# Puntuación inicial: 5 clases
+num_punt_ini_tags = 5
+all_labels_ini = np.concatenate(y_punt_ini)
+freqs_ini = Counter(all_labels_ini)
+total_ini = sum(freqs_ini.values())
+weights_ini = torch.tensor([
+    total_ini / freqs_ini[i] if freqs_ini[i] > 0 else 0.0
+    for i in range(num_punt_ini_tags)
+], dtype=torch.float32).to(device)
+
+# Puntuación final: 5 clases
+num_punt_fin_tags = 5
+all_labels_fin = np.concatenate(y_punt_fin)
+freqs_fin = Counter(all_labels_fin)
+total_fin = sum(freqs_fin.values())
+weights_fin = torch.tensor([
+    total_fin / freqs_fin[i] if freqs_fin[i] > 0 else 0.0
+    for i in range(num_punt_fin_tags)
+], dtype=torch.float32).to(device)
+
+criterion_cap = nn.CrossEntropyLoss(weight=weights_cap)
+criterion_ini = nn.CrossEntropyLoss(weight=weights_ini)
+criterion_fin = nn.CrossEntropyLoss(weight=weights_fin)
+
+
+#%% Entrenamiento con pesos
+for epoch in range(20):
+    model.train()
+    total_loss = 0
+
+    for X_batch, y_cap_batch, y_ini_batch, y_fin_batch in dataloader:
+        X_batch = [x.to(device) for x in X_batch]
+        y_cap_batch = [y.to(device) for y in y_cap_batch]
+        y_ini_batch = [y.to(device) for y in y_ini_batch]
+        y_fin_batch = [y.to(device) for y in y_fin_batch]
+
+        optimizer.zero_grad()
+        batch_loss = 0
+
+        for x, y_cap, y_ini, y_fin in zip(X_batch, y_cap_batch, y_ini_batch, y_fin_batch):
+            x = x.unsqueeze(0)  # [1, seq_len, 15]
+            logits_cap, logits_ini, logits_fin = model(x)
+
+            loss_cap = criterion_cap(logits_cap.squeeze(0), y_cap)
+            loss_ini = criterion_ini(logits_ini.squeeze(0), y_ini)
+            loss_fin = criterion_fin(logits_fin.squeeze(0), y_fin)
+
+            loss = loss_cap + loss_ini + loss_fin
+            loss.backward()
+            batch_loss += loss.item()
+
+        optimizer.step()
+        total_loss += batch_loss
+
+    print(f"Epoch {epoch+1} - Loss: {total_loss:.4f}")
+
+#%% Evaluación del modelo con pesos
+# Evaluación del modelo con pesos
+true_cap = []
+pred_cap = []
+
+true_ini = []
+pred_ini = []
+
+true_fin = []
+pred_fin = []
+
+model.eval()
+
+with torch.no_grad():
+    for X_batch, y_cap_batch, y_ini_batch, y_fin_batch in dataloader:
+        X_batch = [x.to(device) for x in X_batch]
+        y_cap_batch = [y.to(device) for y in y_cap_batch]
+        y_ini_batch = [y.to(device) for y in y_ini_batch]
+        y_fin_batch = [y.to(device) for y in y_fin_batch]
+
+        for x, y_cap, y_ini, y_fin in zip(X_batch, y_cap_batch, y_ini_batch, y_fin_batch):
+            x = x.unsqueeze(0)  # [1, seq_len, 15]
+            logits_cap, logits_ini, logits_fin = model(x)
+
+            pred_cap_logits = logits_cap.squeeze(0).argmax(dim=-1).cpu().numpy()
+            pred_ini_logits = logits_ini.squeeze(0).argmax(dim=-1).cpu().numpy()
+            pred_fin_logits = logits_fin.squeeze(0).argmax(dim=-1).cpu().numpy()
+
+            true_cap.extend(y_cap.cpu().numpy())
+            pred_cap.extend(pred_cap_logits)
+
+            true_ini.extend(y_ini.cpu().numpy())
+            pred_ini.extend(pred_ini_logits)
+
+            true_fin.extend(y_fin.cpu().numpy())
+            pred_fin.extend(pred_fin_logits)
+
+print("\n--- CAPITALIZACIÓN ---")
+print(classification_report(true_cap, pred_cap, target_names=["minúscula", "mayúscula", "Capitalizado", "Mixto"]))
+
+print("\n--- PUNTUACIÓN INICIAL ---")
+print(classification_report(true_ini, pred_ini))
+
+print("\n--- PUNTUACIÓN FINAL ---")
+print(classification_report(true_fin, pred_fin))
+
+#%% Matriz de confusión para puntuación final
+# Matriz de confusión para puntuación final
+
+cm = confusion_matrix(true_fin, pred_fin, labels=[0,1,2,3,4])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Nada', '¿', '?', '.', ','])
+disp.plot(cmap='Blues')
+plt.title("Matriz de confusión - Puntuación Final")
+plt.show()
+
+cm = confusion_matrix(true_ini, pred_ini, labels=[0,1,2,3,4])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Nada', '¿', '?', '.', ','])
+disp.plot(cmap='Blues')
+plt.title("Matriz de confusión - Puntuación Inicial")
+plt.show()
+
+cm = confusion_matrix(true_cap, pred_cap, labels=[0,1,2,3])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["minúscula", "mayúscula", "Capitalizado", "Mixto"])
+disp.plot(cmap='Blues')
+plt.title("Matriz de confusión - Capitalización")
+plt.show()
