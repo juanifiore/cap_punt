@@ -16,6 +16,8 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import numpy as np
+from torch.nn.utils.rnn import pad_sequence
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -49,8 +51,12 @@ class TextRestorationGRU(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(hidden_dim) 
         
-    def forward(self, embeddings):
-        rnn_out, _ = self.gru(embeddings)  # [batch, seq_len, hidden_dim]
+    def forward(self, embeddings, lengths):
+        packed = pack_padded_sequence(embeddings, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_out, _ = self.gru(packed)
+
+        rnn_out, _ = pad_packed_sequence(packed_out, batch_first=True)  # [batch, seq_len, hidden_dim]
+
         rnn_out = self.dropout(rnn_out)
         rnn_out = self.norm(rnn_out)
         
@@ -82,31 +88,6 @@ class EmbeddingSequenceDataset(Dataset):
             torch.tensor(self.y_punt_fin[idx], dtype=torch.long),
         )
 
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-        """
-        alpha: tensor de pesos por clase o None para peso uniforme
-        gamma: parámetro de focalización
-        reduction: 'mean', 'sum' o 'none'
-        """
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        # inputs: [batch, classes]
-        # targets: [batch] con clase como índice
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
-        pt = torch.exp(-ce_loss)
-        focal_loss = (1 - pt) ** self.gamma * ce_loss
-
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        return focal_loss
-
 def get_class_weights(y, num_classes=4):
     all_labels = np.concatenate(y)
     freqs = Counter(all_labels)
@@ -131,41 +112,58 @@ def preprocess_text(text):
 
     return X, y_cap, y_punt_ini, y_punt_fin
 
+def collate_fn(batch):
+    X_batch, y_cap_batch, y_ini_batch, y_fin_batch = zip(*batch)
+    
+    # Padding con 0.0 para X (inputs)
+    X_pad = pad_sequence(X_batch, batch_first=True, padding_value=0.0)   # [batch, max_seq_len, embed_dim]
+    
+    print(f"X_pad shape: {X_pad.shape}")
+
+    # Padding con -100 para etiquetas, que será ignore_index en la loss
+    y_cap_pad = pad_sequence(y_cap_batch, batch_first=True, padding_value=-100)
+    y_ini_pad = pad_sequence(y_ini_batch, batch_first=True, padding_value=-100)
+    y_fin_pad = pad_sequence(y_fin_batch, batch_first=True, padding_value=-100)
+    
+    # Calculo longitudes originales (sin contar padding)
+    lengths = torch.tensor([len(x) for x in X_batch], dtype=torch.long)
+    
+    return X_pad, y_cap_pad, y_ini_pad, y_fin_pad, lengths
+
 def evaluate_model(model, dataloader, mode, device):
-    true_cap = []
-    pred_cap = []
-
-    true_ini = []
-    pred_ini = []
-
-    true_fin = []
-    pred_fin = []
-
     model.eval()
+    
+    true_cap, pred_cap = [], []
+    true_ini, pred_ini = [], []
+    true_fin, pred_fin = [], []
 
     with torch.no_grad():
-        for X_batch, y_cap_batch, y_ini_batch, y_fin_batch in dataloader:
-            X_batch = [x.to(device) for x in X_batch]
-            y_cap_batch = [y.to(device) for y in y_cap_batch]
-            y_ini_batch = [y.to(device) for y in y_ini_batch]
-            y_fin_batch = [y.to(device) for y in y_fin_batch]
+        for X_batch, y_cap_batch, y_ini_batch, y_fin_batch, lengths in dataloader:
+            X_batch = X_batch.to(device)
+            y_cap_batch = y_cap_batch.to(device)
+            y_ini_batch = y_ini_batch.to(device)
+            y_fin_batch = y_fin_batch.to(device)
+            lengths = lengths.to(device)
 
-            for x, y_cap, y_ini, y_fin in zip(X_batch, y_cap_batch, y_ini_batch, y_fin_batch):
-                x = x.unsqueeze(0)  # [1, seq_len, 15]
-                logits_cap, logits_ini, logits_fin = model(x)
-
-                pred_cap_logits = logits_cap.squeeze(0).argmax(dim=-1).cpu().numpy()
-                pred_ini_logits = logits_ini.squeeze(0).argmax(dim=-1).cpu().numpy()
-                pred_fin_logits = logits_fin.squeeze(0).argmax(dim=-1).cpu().numpy()
-
-                true_cap.extend(y_cap.cpu().numpy())
-                pred_cap.extend(pred_cap_logits)
-
-                true_ini.extend(y_ini.cpu().numpy())
-                pred_ini.extend(pred_ini_logits)
-
-                true_fin.extend(y_fin.cpu().numpy())
-                pred_fin.extend(pred_fin_logits)
+            logits_cap, logits_ini, logits_fin = model(X_batch, lengths)
+            
+            pred_cap_batch = logits_cap.argmax(dim=-1).cpu().numpy()
+            pred_ini_batch = logits_ini.argmax(dim=-1).cpu().numpy()
+            pred_fin_batch = logits_fin.argmax(dim=-1).cpu().numpy()
+            
+            y_cap_batch = y_cap_batch.cpu().numpy()
+            y_ini_batch = y_ini_batch.cpu().numpy()
+            y_fin_batch = y_fin_batch.cpu().numpy()
+            
+            for i, length in enumerate(lengths):
+                true_cap.extend(y_cap_batch[i][:length])
+                pred_cap.extend(pred_cap_batch[i][:length])
+                
+                true_ini.extend(y_ini_batch[i][:length])
+                pred_ini.extend(pred_ini_batch[i][:length])
+                
+                true_fin.extend(y_fin_batch[i][:length])
+                pred_fin.extend(pred_fin_batch[i][:length])
 
     print(f"\n--- EVALUACIÓN DEL MODELO : {mode} ---")
 
@@ -198,39 +196,28 @@ def evaluate_model(model, dataloader, mode, device):
     plt.title("Matriz de confusión 1 - Capitalización")
     plt.show()
 
-def train_model(model, dataloader, criterion, optimizer, device):
-    if len(criterion) == 1:
-        criterion_cap, criterion_ini, criterion_fin = criterion[0], criterion[0], criterion[0]
-    else: 
-        criterion_cap, criterion_ini, criterion_fin = criterion
-    
+def train_model(model, dataloader, optimizer, device):
+    model.train()
+
     for epoch in range(20):
-        model.train()
         total_loss = 0
 
-        for X_batch, y_cap_batch, y_ini_batch, y_fin_batch in dataloader:
-            X_batch = [x.to(device) for x in X_batch]
-            y_cap_batch = [y.to(device) for y in y_cap_batch]
-            y_ini_batch = [y.to(device) for y in y_ini_batch]
-            y_fin_batch = [y.to(device) for y in y_fin_batch]
+        for X_batch, y_cap_batch, y_ini_batch, y_fin_batch, lengths in dataloader:
+            X_batch = X_batch.to(device)
+            y_cap_batch = y_cap_batch.to(device)
+            y_ini_batch = y_ini_batch.to(device)
+            y_fin_batch = y_fin_batch.to(device)
+            lengths = lengths.to(device)
 
             optimizer.zero_grad()
-            batch_loss = 0
-
-            for x, y_cap, y_ini, y_fin in zip(X_batch, y_cap_batch, y_ini_batch, y_fin_batch):
-                x = x.unsqueeze(0)  # [1, seq_len, 15]
-                logits_cap, logits_ini, logits_fin = model(x)
-
-                loss_cap = criterion_cap(logits_cap.squeeze(0), y_cap)
-                loss_ini = criterion_ini(logits_ini.squeeze(0), y_ini)
-                loss_fin = criterion_fin(logits_fin.squeeze(0), y_fin)
-
-                loss = loss_cap + loss_ini + loss_fin
-                loss.backward()
-                batch_loss += loss.item()
-
+            
+            logits_cap, logits_ini, logits_fin = model(X_batch, lengths)
+            
+            loss = loss_fn(logits_cap, logits_ini, logits_fin, y_cap_batch, y_ini_batch, y_fin_batch)
+            loss.backward()
             optimizer.step()
-            total_loss += batch_loss
+            
+            total_loss += loss.item()
 
         print(f"Epoch {epoch+1} - Loss: {total_loss:.4f}")
 
@@ -245,7 +232,7 @@ p_final = ["", ".", ",", "?"]
 
 X, y_cap, y_punt_ini, y_punt_fin = preprocess_text(df)
 dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
-dataloader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=lambda x: list(zip(*x)))
+dataloader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn)
 
 # Model
 
@@ -266,13 +253,21 @@ weights_ini = get_class_weights(y_punt_ini, num_classes=5)
 
 # Criterios de pérdida
 
-criterion = nn.CrossEntropyLoss()
-criterion_cap = nn.CrossEntropyLoss(weight=weights_cap)
-criterion_ini = nn.CrossEntropyLoss(weight=weights_ini)
-criterion_fin = nn.CrossEntropyLoss(weight=weights_fin)
+criterion = nn.CrossEntropyLoss(ignore_index=-100)
+criterion_cap = nn.CrossEntropyLoss(weight=weights_cap, ignore_index=-100)
+criterion_ini = nn.CrossEntropyLoss(weight=weights_ini, ignore_index=-100)
+criterion_fin = nn.CrossEntropyLoss(weight=weights_fin, ignore_index=-100)
 
 # Optimizador
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+def loss_fn(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin):
+    # logits: [batch, seq_len, num_classes]
+    # targets: [batch, seq_len]
+    loss_cap = criterion_cap(logits_cap.view(-1, logits_cap.size(-1)), y_cap.view(-1))
+    loss_ini = criterion_ini(logits_ini.view(-1, logits_ini.size(-1)), y_ini.view(-1))
+    loss_fin = criterion_fin(logits_fin.view(-1, logits_fin.size(-1)), y_fin.view(-1))
+    return loss_cap + loss_ini + loss_fin
 
 #%% Entrenamiento y evaluación del modelo
 # Entrenamiento y evaluación del modelo
@@ -280,23 +275,12 @@ optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 # Entrenamiento 1
 print("Entrenamiento 1: Entrenamiento inicial")
 
-train_model(model, dataloader, [criterion], optimizer, device)
+train_model(model, dataloader, optimizer, device)
 
 print("Entrenamiento 1 completado")
 
 # Evaluación del modelo 1
 
 evaluate_model(model, dataloader, 'Base', device)
-
-# Entrenamiento 2 / Finetuning con pesos para clases desbalanceadas
-print("Entrenamiento 2: Finetuning con pesos para clases desbalanceadas")
-
-train_model(model, dataloader, [criterion_cap, criterion_ini, criterion_fin], optimizer, device)
-
-print("Entrenamiento 2 completado")
-
-# Evaluación del modelo 2
-
-evaluate_model(model, dataloader, 'Weights', device)
 
 # %%
