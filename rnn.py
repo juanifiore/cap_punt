@@ -16,6 +16,9 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import numpy as np
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score, accuracy_score
+
+
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -170,13 +173,25 @@ def evaluate_model(model, dataloader, mode, device):
     print(f"\n--- EVALUACIÓN DEL MODELO : {mode} ---")
 
     print("\n--- CAPITALIZACIÓN ---")
-    print(classification_report(true_cap, pred_cap, target_names=["minúscula", "mayúscula", "Capitalizado", "Mixto"]))
+    print(classification_report(true_cap, pred_cap, target_names=["Minúscula", "Capitalizado", "Mixto", "Mayúscula"]))
+    print("Accuracy:", accuracy_score(true_cap, pred_cap))
+    print("F1-macro:", f1_score(true_cap, pred_cap, average='macro'))
+    print("F1-weighted:", f1_score(true_cap, pred_cap, average='weighted'))
+    print("F1-micro:", f1_score(true_cap, pred_cap, average='micro'))
 
     print("\n--- PUNTUACIÓN INICIAL ---")
     print(classification_report(true_ini, pred_ini))
+    print("Accuracy:", accuracy_score(true_ini, pred_ini))
+    print("F1-macro:", f1_score(true_ini, pred_ini, average='macro'))
+    print("F1-weighted:", f1_score(true_ini, pred_ini, average='weighted'))
+    print("F1-micro:", f1_score(true_ini, pred_ini, average='micro'))
 
     print("\n--- PUNTUACIÓN FINAL ---")
     print(classification_report(true_fin, pred_fin))
+    print("Accuracy:", accuracy_score(true_fin, pred_fin))
+    print("F1-macro:", f1_score(true_fin, pred_fin, average='macro'))
+    print("F1-weighted:", f1_score(true_fin, pred_fin, average='weighted'))
+    print("F1-micro:", f1_score(true_fin, pred_fin, average='micro'))
 
     # Matriz de confusión 1
 
@@ -193,7 +208,7 @@ def evaluate_model(model, dataloader, mode, device):
     plt.show()
 
     cm = confusion_matrix(true_cap, pred_cap, labels=[0,1,2,3])
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["minúscula", "mayúscula", "Capitalizado", "Mixto"])
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Minúscula", "Capitalizado", "Mixto", "Mayúscula"])
     disp.plot(cmap='Blues')
     plt.title("Matriz de confusión 1 - Capitalización")
     plt.show()
@@ -204,7 +219,7 @@ def train_model(model, dataloader, criterion, optimizer, device):
     else: 
         criterion_cap, criterion_ini, criterion_fin = criterion
     
-    for epoch in range(20):
+    for epoch in range(50):
         model.train()
         total_loss = 0
 
@@ -248,9 +263,9 @@ dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
 dataloader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=lambda x: list(zip(*x)))
 
 # Model
-
+embed_dim = 15  # Dimensión de las embeddings
 model = TextRestorationGRU(
-    embed_dim=15,
+    embed_dim=embed_dim,
     hidden_dim=64,
     shared_dim=32,
     num_caps_tags=4,

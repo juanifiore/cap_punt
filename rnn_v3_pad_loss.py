@@ -18,6 +18,8 @@ import torch.nn.functional as F
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score, accuracy_score
+
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -118,7 +120,7 @@ def collate_fn(batch):
     # Padding con 0.0 para X (inputs)
     X_pad = pad_sequence(X_batch, batch_first=True, padding_value=0.0)   # [batch, max_seq_len, embed_dim]
     
-    print(f"X_pad shape: {X_pad.shape}")
+    #print(f"X_pad shape: {X_pad.shape}")
 
     # Padding con -100 para etiquetas, que será ignore_index en la loss
     y_cap_pad = pad_sequence(y_cap_batch, batch_first=True, padding_value=-100)
@@ -168,13 +170,25 @@ def evaluate_model(model, dataloader, mode, device):
     print(f"\n--- EVALUACIÓN DEL MODELO : {mode} ---")
 
     print("\n--- CAPITALIZACIÓN ---")
-    print(classification_report(true_cap, pred_cap, target_names=["minúscula", "mayúscula", "Capitalizado", "Mixto"]))
+    print(classification_report(true_cap, pred_cap, target_names=["Minúscula", "Capitalizado", "Mixto", "Mayúscula"]))
+    print("Accuracy:", accuracy_score(true_cap, pred_cap))
+    print("F1-macro:", f1_score(true_cap, pred_cap, average='macro'))
+    print("F1-weighted:", f1_score(true_cap, pred_cap, average='weighted'))
+    print("F1-micro:", f1_score(true_cap, pred_cap, average='micro'))
 
     print("\n--- PUNTUACIÓN INICIAL ---")
     print(classification_report(true_ini, pred_ini))
+    print("Accuracy:", accuracy_score(true_ini, pred_ini))
+    print("F1-macro:", f1_score(true_ini, pred_ini, average='macro'))
+    print("F1-weighted:", f1_score(true_ini, pred_ini, average='weighted'))
+    print("F1-micro:", f1_score(true_ini, pred_ini, average='micro'))
 
     print("\n--- PUNTUACIÓN FINAL ---")
     print(classification_report(true_fin, pred_fin))
+    print("Accuracy:", accuracy_score(true_fin, pred_fin))
+    print("F1-macro:", f1_score(true_fin, pred_fin, average='macro'))
+    print("F1-weighted:", f1_score(true_fin, pred_fin, average='weighted'))
+    print("F1-micro:", f1_score(true_fin, pred_fin, average='micro'))
 
     # Matriz de confusión 1
 
@@ -191,15 +205,15 @@ def evaluate_model(model, dataloader, mode, device):
     plt.show()
 
     cm = confusion_matrix(true_cap, pred_cap, labels=[0,1,2,3])
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["minúscula", "mayúscula", "Capitalizado", "Mixto"])
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Minúscula", "Capitalizado", "Mixto", "Mayúscula"])
     disp.plot(cmap='Blues')
     plt.title("Matriz de confusión 1 - Capitalización")
     plt.show()
 
-def train_model(model, dataloader, optimizer, device):
+def train_model(model, dataloader, optimizer, device, loss_func, epochs=20):
     model.train()
 
-    for epoch in range(20):
+    for epoch in range(epochs):
         total_loss = 0
 
         for X_batch, y_cap_batch, y_ini_batch, y_fin_batch, lengths in dataloader:
@@ -213,7 +227,7 @@ def train_model(model, dataloader, optimizer, device):
             
             logits_cap, logits_ini, logits_fin = model(X_batch, lengths)
             
-            loss = loss_fn(logits_cap, logits_ini, logits_fin, y_cap_batch, y_ini_batch, y_fin_batch)
+            loss = loss_func(logits_cap, logits_ini, logits_fin, y_cap_batch, y_ini_batch, y_fin_batch)
             loss.backward()
             optimizer.step()
             
@@ -269,15 +283,29 @@ def loss_fn(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin):
     loss_fin = criterion_fin(logits_fin.view(-1, logits_fin.size(-1)), y_fin.view(-1))
     return loss_cap + loss_ini + loss_fin
 
+def loss_norm(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin):
+    # logits: [batch, seq_len, num_classes]
+    # targets: [batch, seq_len]
+    loss_cap = criterion(logits_cap.view(-1, logits_cap.size(-1)), y_cap.view(-1))
+    loss_ini = criterion(logits_ini.view(-1, logits_ini.size(-1)), y_ini.view(-1))
+    loss_fin = criterion(logits_fin.view(-1, logits_fin.size(-1)), y_fin.view(-1))
+    return loss_cap + loss_ini + loss_fin
+
 #%% Entrenamiento y evaluación del modelo
 # Entrenamiento y evaluación del modelo
 
 # Entrenamiento 1
 print("Entrenamiento 1: Entrenamiento inicial")
 
-train_model(model, dataloader, optimizer, device)
+train_model(model, dataloader, optimizer, device, loss_norm, epochs=20)
 
 print("Entrenamiento 1 completado")
+
+print("Entrenamiento 2")
+
+train_model(model, dataloader, optimizer, device, loss_fn, epochs=50)
+
+print("Entrenamiento 2 completado")
 
 # Evaluación del modelo 1
 
