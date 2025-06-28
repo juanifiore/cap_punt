@@ -19,21 +19,55 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score, accuracy_score
+import sympy
 
-
-
+embed_dim = 768 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Usando dispositivo: {device}")
+atencion = False 
+bi = False 
 
 #%% Funciones y clases
 # Funciones y clases
+class Attention(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.attn = nn.Linear(hidden_dim, 1)
+
+    def forward(self, rnn_out, mask=None):
+        # rnn_out: [batch, seq_len, hidden_dim]
+        attn_weights = self.attn(rnn_out).squeeze(-1)  # [batch, seq_len]
+        
+        if mask is not None:
+            attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
+
+        attn_weights = F.softmax(attn_weights, dim=-1)  # [batch, seq_len]
+        attended_output = torch.sum(rnn_out * attn_weights.unsqueeze(-1), dim=1)  # [batch, hidden_dim]
+        return attended_output, attn_weights
 
 class TextRestorationGRU(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, shared_dim, num_caps_tags, num_punt_ini_tags, num_punt_fin_tags, dropout=0.3):
+    def __init__(self, embed_dim, hidden_dim, shared_dim, num_caps_tags, num_punt_ini_tags, num_punt_fin_tags, dropout=0.1):
         super().__init__()
-        self.gru = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=False)
-        self.shared_layer = nn.Linear(hidden_dim, shared_dim)
-        
+        if bi: 
+           self.gru = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
+           self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
+           hidden_dim_2 = hidden_dim * 2
+        else: 
+            self.gru = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=False)
+            self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=False)
+            hidden_dim_2 = hidden_dim
+
+        self.norm = nn.LayerNorm(hidden_dim_2)
+        self.attention = Attention(hidden_dim_2)
+
+        self.shared_layer = nn.Sequential(
+            nn.Linear(hidden_dim_2, shared_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(shared_dim, shared_dim),
+            nn.ReLU(),
+        )
+
         self.cap_head = nn.Sequential(
             nn.Linear(shared_dim, shared_dim),
             nn.ReLU(),
@@ -51,7 +85,6 @@ class TextRestorationGRU(nn.Module):
         )
 
         self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(hidden_dim) 
         
     def forward(self, embeddings, lengths):
         packed = pack_padded_sequence(embeddings, lengths.cpu(), batch_first=True, enforce_sorted=False)
@@ -61,16 +94,32 @@ class TextRestorationGRU(nn.Module):
 
         rnn_out = self.dropout(rnn_out)
         rnn_out = self.norm(rnn_out)
+
+        if atencion: 
+            attended, attn_weights = self.attention(rnn_out)  # [batch, hidden_dim]
+            # Expande attended para que tenga dimensión secuencial si necesitás
+            attended_seq = attended.unsqueeze(1).expand(-1, rnn_out.size(1), -1)  # [batch, seq_len, hidden_dim]
+
+            # Pasás por la shared_layer si querés
+            shared_rep = self.shared_layer(attended_seq)
+
+            # Heads
+            return (
+                self.cap_head(shared_rep),
+                self.punt_ini_head(shared_rep),
+                self.punt_fin_head(shared_rep),
+            )
         
-        # Capa común con activación ReLU
-        shared_rep = F.relu(self.shared_layer(rnn_out))  # [batch, seq_len, shared_dim]
-        
-        # Salidas separadas para capitalización y puntuación
-        return (
-            self.cap_head(shared_rep),         # logits capitalización
-            self.punt_ini_head(shared_rep),    # logits puntuación inicial
-            self.punt_fin_head(shared_rep),    # logits puntuación final
-        )
+        else:    
+            # Capa común con activación ReLU
+            shared_rep = F.relu(self.shared_layer(rnn_out))  # [batch, seq_len, shared_dim]
+            
+            # Salidas separadas para capitalización y puntuación
+            return (
+                self.cap_head(shared_rep),         # logits capitalización
+                self.punt_ini_head(shared_rep),    # logits puntuación inicial
+                self.punt_fin_head(shared_rep),    # logits puntuación final
+            )
 
 class EmbeddingSequenceDataset(Dataset):
     def __init__(self, X, y_cap, y_punt_ini, y_punt_fin):
@@ -100,8 +149,8 @@ def get_class_weights(y, num_classes=4):
     ], dtype=torch.float32).to(device)
     return weights
 
-def preprocess_text(text):
-    embedding_cols = [f"dim_red_{i}" for i in range(15)]
+def preprocess_text(df):
+    embedding_cols = [f"dim_{i}" for i in range(embed_dim)]
     grouped = df.groupby("instancia_id")
 
     X, y_cap, y_punt_ini, y_punt_fin = [], [], [], []
@@ -192,14 +241,14 @@ def evaluate_model(model, dataloader, mode, device):
 
     # Matriz de confusión 1
 
-    cm = confusion_matrix(true_fin, pred_fin, labels=[0,1,2,3,4])
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Nada', '¿', '?', '.', ','])
+    cm = confusion_matrix(true_fin, pred_fin, labels=[0,1,2,3])
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Nada','?', '.', ','])
     disp.plot(cmap='Blues')
     plt.title("Matriz de confusión 1 - Puntuación Final")
     plt.show()
 
-    cm = confusion_matrix(true_ini, pred_ini, labels=[0,1,2,3,4])
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Nada', '¿', '?', '.', ','])
+    cm = confusion_matrix(true_ini, pred_ini, labels=[0,1])
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Nada', '¿'])
     disp.plot(cmap='Blues')
     plt.title("Matriz de confusión 1 - Puntuación Inicial")
     plt.show()
@@ -227,43 +276,49 @@ def train_model(model, dataloader, optimizer, device, loss_func, epochs=20):
             
             logits_cap, logits_ini, logits_fin = model(X_batch, lengths)
             
-            loss = loss_func(logits_cap, logits_ini, logits_fin, y_cap_batch, y_ini_batch, y_fin_batch)
+            mask = torch.arange(logits_cap.size(1), device=lengths.device)[None, :] < lengths[:, None]
+
+            loss = loss_func(logits_cap, logits_ini, logits_fin, y_cap_batch, y_ini_batch, y_fin_batch, mask)
             loss.backward()
             optimizer.step()
             
             total_loss += loss.item()
-
-        print(f"Epoch {epoch+1} - Loss: {total_loss:.4f}")
+        
+        if epoch % 10 == 0 or epoch == epochs-1: 
+            print(f"Epoch {epoch+1} - Loss: {total_loss:.4f}")
 
 #%% Cargar datos
 # Cargar datos
 
 # Cargar el CSV
 
-df = pd.read_csv("./tokens_etiquetados/tokens_etiquetados_or_fin1000_dim_152.csv")
+df = pd.read_csv("./tokens_etiquetados/tokens_etiquetados_or_fin10000_dim_768.csv")[:1000]
+df['i_punt_final'] = df['i_punt_final'].replace({0: 0, 2: 1, 3: 2, 4: 3})
+
 p_inicial = ["", "¿"]
 p_final = ["", ".", ",", "?"]
+batch_size = len(df)//20 + 1
 
 X, y_cap, y_punt_ini, y_punt_fin = preprocess_text(df)
 dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
-dataloader = DataLoader(dataset, batch_size=32, shuffle=True, collate_fn=collate_fn)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 # Model
-
+embed_dim = 768 
 model = TextRestorationGRU(
-    embed_dim=15,
+    embed_dim=embed_dim,
     hidden_dim=64,
     shared_dim=32,
     num_caps_tags=4,
-    num_punt_ini_tags=5,  
-    num_punt_fin_tags=5,
+    num_punt_ini_tags=len(p_inicial),  
+    num_punt_fin_tags=len(p_final),
 ).to(device)
 
 # Pesos por clase
 
 weights_cap = get_class_weights(y_cap)
-weights_fin = get_class_weights(y_punt_fin, num_classes=5)
-weights_ini = get_class_weights(y_punt_ini, num_classes=5)
+weights_fin = get_class_weights(y_punt_fin, num_classes=len(p_final))
+weights_ini = get_class_weights(y_punt_ini, num_classes=len(p_inicial))
 
 # Criterios de pérdida
 
@@ -275,39 +330,50 @@ criterion_fin = nn.CrossEntropyLoss(weight=weights_fin, ignore_index=-100)
 # Optimizador
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-def loss_fn(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin):
-    # logits: [batch, seq_len, num_classes]
-    # targets: [batch, seq_len]
-    loss_cap = criterion_cap(logits_cap.view(-1, logits_cap.size(-1)), y_cap.view(-1))
-    loss_ini = criterion_ini(logits_ini.view(-1, logits_ini.size(-1)), y_ini.view(-1))
-    loss_fin = criterion_fin(logits_fin.view(-1, logits_fin.size(-1)), y_fin.view(-1))
+def masked_cross_entropy(logits, targets, mask, criterion):
+    logits_flat = logits.view(-1, logits.size(-1))          # [batch * seq_len, num_classes]
+    targets_flat = targets.view(-1)                         # [batch * seq_len]
+    mask_flat = mask.view(-1)                               # [batch * seq_len]
+    
+    logits_valid = logits_flat[mask_flat]
+    targets_valid = targets_flat[mask_flat]
+    
+    return criterion(logits_valid, targets_valid)  # devuelve escalar
+
+def loss_fn(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin, mask):
+    loss_cap = masked_cross_entropy(logits_cap, y_cap, mask, criterion_cap)
+    loss_ini = masked_cross_entropy(logits_ini, y_ini, mask, criterion_ini)
+    loss_fin = masked_cross_entropy(logits_fin, y_fin, mask, criterion_fin)
     return loss_cap + loss_ini + loss_fin
 
-def loss_norm(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin):
-    # logits: [batch, seq_len, num_classes]
-    # targets: [batch, seq_len]
-    loss_cap = criterion(logits_cap.view(-1, logits_cap.size(-1)), y_cap.view(-1))
-    loss_ini = criterion(logits_ini.view(-1, logits_ini.size(-1)), y_ini.view(-1))
-    loss_fin = criterion(logits_fin.view(-1, logits_fin.size(-1)), y_fin.view(-1))
+def loss_norm(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin, mask):
+    loss_cap = masked_cross_entropy(logits_cap, y_cap, mask, criterion)
+    loss_ini = masked_cross_entropy(logits_ini, y_ini, mask, criterion)
+    loss_fin = masked_cross_entropy(logits_fin, y_fin, mask, criterion)
     return loss_cap + loss_ini + loss_fin
-
 #%% Entrenamiento y evaluación del modelo
 # Entrenamiento y evaluación del modelo
 
 # Entrenamiento 1
-print("Entrenamiento 1: Entrenamiento inicial")
+print("Entrenamiento 1: Norm")
 
-train_model(model, dataloader, optimizer, device, loss_norm, epochs=20)
+train_model(model, dataloader, optimizer, device, loss_norm, epochs=100)
 
 print("Entrenamiento 1 completado")
+#%% Entrenamiento weights 
+# Entrenamiento weights 
 
-print("Entrenamiento 2")
+# Entrenamiento 2
+print("Entrenamiento 2: Weight")
 
-train_model(model, dataloader, optimizer, device, loss_fn, epochs=50)
+train_model(model, dataloader, optimizer, device, loss_fn, epochs=60)
 
 print("Entrenamiento 2 completado")
 
-# Evaluación del modelo 1
+
+#%% Evaluación del modelo
+
+# Evaluación del modelo
 
 evaluate_model(model, dataloader, 'Base', device)
 
