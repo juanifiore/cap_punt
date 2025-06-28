@@ -25,7 +25,7 @@ embed_dim = 768
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Usando dispositivo: {device}")
 atencion = False 
-bi = False 
+bi = True 
 
 #%% Funciones y clases
 # Funciones y clases
@@ -292,12 +292,13 @@ def train_model(model, dataloader, optimizer, device, loss_func, epochs=20):
 
 # Cargar el CSV
 
-df = pd.read_csv("./tokens_etiquetados/tokens_etiquetados_or_fin10000_dim_768.csv")[:1000]
+df = pd.read_csv("./tokens_etiquetados/tokens_etiquetados_or_fin10000_dim_768.csv")
+#df = df[df['instancia_id'].between(0, 1000)]
 df['i_punt_final'] = df['i_punt_final'].replace({0: 0, 2: 1, 3: 2, 4: 3})
 
 p_inicial = ["", "¿"]
 p_final = ["", ".", ",", "?"]
-batch_size = len(df)//20 + 1
+batch_size = 32
 
 X, y_cap, y_punt_ini, y_punt_fin = preprocess_text(df)
 dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
@@ -357,7 +358,7 @@ def loss_norm(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin, mask):
 # Entrenamiento 1
 print("Entrenamiento 1: Norm")
 
-train_model(model, dataloader, optimizer, device, loss_norm, epochs=100)
+train_model(model, dataloader, optimizer, device, loss_norm, epochs=50)
 
 print("Entrenamiento 1 completado")
 #%% Entrenamiento weights 
