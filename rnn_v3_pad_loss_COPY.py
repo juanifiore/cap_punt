@@ -31,18 +31,16 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 set_seed(seed)
 
-embed_dim = 256
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 print(f"Usando dispositivo: {device}")
+
+embed_dim = 256
 atencion = False 
 bi = False 
 
 df = pd.read_csv(f"./tokens_etiquetados/tokens_etiquetados_dim{embed_dim}PCA.csv")
 #df = df[df['instancia_id']==1]
 df['i_punt_final'] = df['i_punt_final'].replace({0: 0, 2: 1, 3: 2, 4: 3})
-
-
 
 instancias = df['instancia_id'].unique()
 print(f"Total de instancias: {len(instancias)}")
@@ -76,82 +74,61 @@ class Attention(nn.Module):
         attn_weights = F.softmax(attn_weights, dim=-1)  # [batch, seq_len]
         attended_output = torch.sum(rnn_out * attn_weights.unsqueeze(-1), dim=1)  # [batch, hidden_dim]
         return attended_output, attn_weights
-
+    
 class TextRestorationGRU(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, shared_dim, num_caps_tags, num_punt_ini_tags, num_punt_fin_tags, dropout=0.1):
+    def __init__(self, embed_dim, hidden_dim, num_caps_tags, num_punt_ini_tags, num_punt_fin_tags, dropout=0.1):
         super().__init__()
+
         if bi: 
-           self.gru = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
-           self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
-           hidden_dim_2 = hidden_dim * 2
+            self.gru = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
+            hidden_dim_2 = hidden_dim * 2
         else: 
             self.gru = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=False)
-            self.lstm = nn.LSTM(embed_dim, hidden_dim, batch_first=True, bidirectional=False)
             hidden_dim_2 = hidden_dim
 
         self.norm = nn.LayerNorm(hidden_dim_2)
-        self.attention = Attention(hidden_dim_2)
+        if atencion:
+            self.attention = Attention(hidden_dim_2)
 
-        self.shared_layer = nn.Sequential(
-            nn.Linear(hidden_dim_2, shared_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(shared_dim, shared_dim),
-            nn.ReLU(),
-        )
-
+        # Heads (ahora actúan directamente sobre rnn_out o attended_seq)
         self.cap_head = nn.Sequential(
-            nn.Linear(shared_dim, shared_dim),
+            nn.Linear(hidden_dim_2, hidden_dim_2),
             nn.ReLU(),
-            nn.Linear(shared_dim, num_caps_tags)
+            nn.Linear(hidden_dim_2, num_caps_tags)
         )
         self.punt_ini_head = nn.Sequential(
-            nn.Linear(shared_dim, shared_dim),
+            nn.Linear(hidden_dim_2, hidden_dim_2),
             nn.ReLU(),
-            nn.Linear(shared_dim, num_punt_ini_tags)
+            nn.Linear(hidden_dim_2, num_punt_ini_tags)
         )
         self.punt_fin_head = nn.Sequential(
-            nn.Linear(shared_dim, shared_dim),
+            nn.Linear(hidden_dim_2, hidden_dim_2),
             nn.ReLU(),
-            nn.Linear(shared_dim, num_punt_fin_tags)
+            nn.Linear(hidden_dim_2, num_punt_fin_tags)
         )
 
         self.dropout = nn.Dropout(dropout)
-        
+
     def forward(self, embeddings, lengths):
         packed = pack_padded_sequence(embeddings, lengths.cpu(), batch_first=True, enforce_sorted=False)
         packed_out, _ = self.gru(packed)
-
-        rnn_out, _ = pad_packed_sequence(packed_out, batch_first=True)  # [batch, seq_len, hidden_dim]
+        rnn_out, _ = pad_packed_sequence(packed_out, batch_first=True)
 
         rnn_out = self.dropout(rnn_out)
         rnn_out = self.norm(rnn_out)
 
-        if atencion: 
-            attended, attn_weights = self.attention(rnn_out)  # [batch, hidden_dim]
-            # Expande attended para que tenga dimensión secuencial si necesitás
-            attended_seq = attended.unsqueeze(1).expand(-1, rnn_out.size(1), -1)  # [batch, seq_len, hidden_dim]
+        if atencion:
+            attended, _ = self.attention(rnn_out)
+            attended_seq = attended.unsqueeze(1).expand(-1, rnn_out.size(1), -1)
+            xx = attended_seq
+        else:
+            xx = rnn_out
 
-            # Pasás por la shared_layer si querés
-            shared_rep = self.shared_layer(attended_seq)
-
-            # Heads
-            return (
-                self.cap_head(shared_rep),
-                self.punt_ini_head(shared_rep),
-                self.punt_fin_head(shared_rep),
-            )
-        
-        else:    
-            # Capa común con activación ReLU
-            shared_rep = F.relu(self.shared_layer(rnn_out))  # [batch, seq_len, shared_dim]
-            
-            # Salidas separadas para capitalización y puntuación
-            return (
-                self.cap_head(shared_rep),         # logits capitalización
-                self.punt_ini_head(shared_rep),    # logits puntuación inicial
-                self.punt_fin_head(shared_rep),    # logits puntuación final
-            )
+        return (
+            self.cap_head(xx),
+            self.punt_ini_head(xx),
+            self.punt_fin_head(xx)
+        )
 
 class EmbeddingSequenceDataset(Dataset):
     def __init__(self, X, y_cap, y_punt_ini, y_punt_fin):
@@ -332,7 +309,6 @@ dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn
 model = TextRestorationGRU(
     embed_dim=embed_dim,
     hidden_dim=64,
-    shared_dim=32,
     num_caps_tags=4,
     num_punt_ini_tags=len(p_inicial),  
     num_punt_fin_tags=len(p_final),
@@ -403,7 +379,7 @@ X_test, y_cap_test, y_punt_ini_test, y_punt_fin_test = preprocess_text(df_test)
 dataset_test = EmbeddingSequenceDataset(X_test, y_cap_test, y_punt_ini_test, y_punt_fin_test)
 dataloader_test = DataLoader(dataset_test, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
-evaluate_model(model, dataloader_test, 'Base', device)
+evaluate_model(model, dataloader_test, 'Unidireccional', device)
 
 # %% Evaluación single 
 ## Evaluación single 
