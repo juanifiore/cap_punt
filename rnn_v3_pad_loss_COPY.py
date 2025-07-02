@@ -37,21 +37,23 @@ print(f"Usando dispositivo: {device}")
 embed_dim = 256
 atencion = False 
 bi = False 
+train_test = False
 
-df = pd.read_csv(f"./tokens_etiquetados/tokens_etiquetados_dim{embed_dim}PCA.csv")
+df = pd.read_csv(f"./tokens_etiquetados/dataset_final_DEV1.csv")
 #df = df[df['instancia_id']==1]
 df['i_punt_final'] = df['i_punt_final'].replace({0: 0, 2: 1, 3: 2, 4: 3})
 
 instancias = df['instancia_id'].unique()
 print(f"Total de instancias: {len(instancias)}")
 
-train_ids, test_ids = train_test_split(instancias, test_size=0.15, random_state=42)
+if train_test: 
+    train_ids, test_ids = train_test_split(instancias, test_size=0.15, random_state=42)
 
-df_train = df[df['instancia_id'].isin(train_ids)]
-df_test = df[df['instancia_id'].isin(test_ids)]
+    df_train = df[df['instancia_id'].isin(train_ids)]
+    df_test = df[df['instancia_id'].isin(test_ids)]
 
-print(f"Instancias en train: {df_train['instancia_id'].nunique()}")
-print(f"Instancias en test: {df_test['instancia_id'].nunique()}")
+    print(f"Instancias en train: {df_train['instancia_id'].nunique()}")
+    print(f"Instancias en test: {df_test['instancia_id'].nunique()}")
 
 p_inicial = ["", "¿"]
 p_final = ["", ".", ",", "?"]
@@ -300,10 +302,16 @@ def train_model(model, dataloader, optimizer, device, loss_func, epochs=20):
 # Cargar datos
 
 # Cargar el CSV
+if train_test:
+    X, y_cap, y_punt_ini, y_punt_fin = preprocess_text(df_train)
+else: 
+    X, y_cap, y_punt_ini, y_punt_fin = preprocess_text(df)
+    df_test = pd.read_csv(f"./tokens_etiquetados/tokens_etiquetados_dim256PCA.csv")
+    print(f"Instancias en test: {df_test['instancia_id'].nunique()}")
+    X_test, y_cap_test, y_punt_ini_test, y_punt_fin_test = preprocess_text(df_test)
+    dataset_test = EmbeddingSequenceDataset(X_test, y_cap_test, y_punt_ini_test, y_punt_fin_test)
+    dataloader_test = DataLoader(dataset_test, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
-X, y_cap, y_punt_ini, y_punt_fin = preprocess_text(df_train)
-dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 # Model
 model = TextRestorationGRU(
@@ -351,26 +359,71 @@ def loss_norm(logits_cap, logits_ini, logits_fin, y_cap, y_ini, y_fin, mask):
     loss_ini = masked_cross_entropy(logits_ini, y_ini, mask, criterion)
     loss_fin = masked_cross_entropy(logits_fin, y_fin, mask, criterion)
     return loss_cap + loss_ini + loss_fin
-#%% Entrenamiento y evaluación del modelo
-# Entrenamiento y evaluación del modelo
-
+#%% # Entrenamiento 1
 # Entrenamiento 1
-print("Entrenamiento 1: Norm")
 
-train_model(model, dataloader, optimizer, device, loss_norm, epochs=150)
+train_losses, val_losses = [], []
+fractions = np.linspace(0.1, 1.0, 5)
+
+print("Entrenamiento 1: con aumento de dataset")
+
+for frac in fractions: 
+    total = 50000
+    parcial = int(total*frac)
+    batch_size = int(parcial * 0.2) +1 
+    print(parcial)
+    dataset = EmbeddingSequenceDataset(X[:parcial], y_cap[:parcial], y_punt_ini[:parcial], y_punt_fin[:parcial])
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    
+    train_model(model, dataloader, optimizer, device, loss_norm, epochs=30)
+    evaluate_model(model, dataloader_test, 'Unidireccional', device)
 
 print("Entrenamiento 1 completado")
-#%% Entrenamiento weights 
-# Entrenamiento weights 
 
+#%% # Entrenamiento 2
 # Entrenamiento 2
-print("Entrenamiento 2: Weight")
 
-train_model(model, dataloader, optimizer, device, loss_fn, epochs=50)
+batch_size = 1000
+dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+
+
+print("Entrenamiento 2: Dataset Completo")
+train_model(model, dataloader, optimizer, device, loss_norm, epochs=100)
+evaluate_model(model, dataloader_test, 'Unidireccional', device)
 
 print("Entrenamiento 2 completado")
+torch.save(model.state_dict(), 'pesos2.pth')
+
+#%% # Entrenamiento 3
+# Entrenamiento 3
+
+print("Entrenamiento 3: Weight")
+
+train_model(model, dataloader, optimizer, device, loss_fn, epochs=20)
+evaluate_model(model, dataloader_test, 'Unidireccional', device)
+
+print("Entrenamiento 3 completado")
+
+torch.save(model.state_dict(), 'pesos3.pth')
+
+#%% # Entrenamiento 4
+# Entrenamiento 4
+
+print("Entrenamiento 4: Dataset Completo")
+
+batch_size = 100
+X, y_cap, y_punt_ini, y_punt_fin = preprocess_text(df[(df['instancia_id'] >= 30000) & (df['instancia_id'] <= 35000)])
+dataset = EmbeddingSequenceDataset(X, y_cap, y_punt_ini, y_punt_fin)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 
+train_model(model, dataloader, optimizer, device, loss_norm, epochs=300)
+evaluate_model(model, dataloader_test, 'Unidireccional', device)
+
+print("Entrenamiento 4 completado")
+
+torch.save(model.state_dict(), 'pesos4.pth')
 #%% Evaluación del modelo
 
 # Evaluación del modelo
